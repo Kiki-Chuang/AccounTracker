@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <title>會計自動化核帳工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+</head>
+
+<body class="bg-gray-50 p-8">
+    <div class="max-w-6xl mx-auto">
+        <h1 class="text-2xl font-bold mb-6 text-gray-800">核帳小工具</h1>
+
+        <div class="grid grid-cols-2 gap-6 mb-6">
+            <div class="bg-white p-4 rounded shadow">
+                <h2 class="font-bold mb-2">上傳區 A：中信 CSV</h2>
+                <input type="file" id="fileA"
+                    class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+            </div>
+            <div class="bg-white p-4 rounded shadow">
+                <h2 class="font-bold mb-2">上傳區 B：內部資料 (直接貼上 Excel)</h2>
+                <textarea id="pasteB" placeholder="在此貼上 Excel 內容..."
+                    class="w-full h-24 p-2 border rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"></textarea>
+            </div>
+        </div>
+
+        <div class="flex space-x-4 mb-6">
+            <button id="compareBtn"
+                class="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 transition font-bold shadow-md">開始自動比對</button>
+            <button onclick="location.reload()" class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300">清空重置</button>
+        </div>
+
+        <div id="resultArea" class="mt-8">
+            </div>
+    </div>
+
+    <script>
+        let dataA = [], dataB = [];
+
+        // 全形轉半形工具
+        const toHalf = (s) => String(s || "").replace(/[\uff01-\uff5e]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).trim();
+
+        // 1. 處理 Excel 貼上功能 (B 區)
+        document.getElementById('pasteB').addEventListener('input', (e) => {
+            const text = e.target.value;
+            if (!text.trim()) return;
+
+            const rows = text.split('\n').filter(r => r.trim() !== "");
+            let colIndex = { name: -1, amount: -1, code: -1, account: -1 };
+
+            dataB = rows.map((rowStr, index) => {
+                let cols = rowStr.split('\t').map(col => toHalf(col));
+
+                if (index === 0) {
+                    colIndex.name = cols.indexOf("備註附言");
+                    colIndex.amount = cols.indexOf("應付金額");
+                    colIndex.code = cols.indexOf("銀行代碼");
+                    colIndex.account = cols.indexOf("銀行帳號");
+                    return ["備註附言", "應付金額", "銀行代碼-銀行帳號"];
+                }
+
+                const rawName = colIndex.name > -1 ? cols[colIndex.name] : "";
+                const rawAmount = colIndex.amount > -1 ? cols[colIndex.amount] : "0";
+                const bankCode = colIndex.code > -1 ? cols[colIndex.code] : "";
+                const bankAccount = colIndex.account > -1 ? (cols[colIndex.account] || "").trim().padStart(16, '0') : "";
+
+                return [rawName, rawAmount, `${bankCode}-${bankAccount}`];
+            });
+
+            console.log("內部資料 (B) 已解析:", dataB);
+            e.target.classList.add('bg-blue-50');
+        });
+
+        // 2. 處理 中信 CSV 上傳 (A 區)
+        document.getElementById('fileA').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            Papa.parse(file, {
+                complete: (results) => {
+                    dataA = results.data.map(row => row.map(col => toHalf(col)));
+                    console.log("銀行資料 (A) 已載入:", dataA);
+                },
+                header: false
+            });
+        });
+
+        // 3. 比對按鈕事件
+        document.getElementById('compareBtn').addEventListener('click', () => {
+            if (dataA.length === 0 || dataB.length === 0) {
+                return alert("請確認 A 區 CSV 已上傳且 B 區資料已貼上");
+            }
+            compareData();
+        });
+
+        function compareData() {
+            const resultArea = document.getElementById('resultArea');
+            // 中信 CSV 典型索引：6為備註(附言), 4為提支金額, 3為轉入帳號(可能需依實際檔案調整)
+            const COL_A = { NOTE: 6, AMT: 4, ACC: 3 }; 
+
+            const matchedBIndexes = new Set();
+            let htmlA = ""; 
+            let htmlB = "";
+
+            // --- 遍歷 A 區 (點名開始) ---
+            dataA.slice(1).forEach(rowA => {
+                if (rowA.length < 5) return;
+
+                const noteA = toHalf(rowA[COL_A.NOTE] || "");
+                const amtA = parseFloat(rowA[COL_A.AMT]?.replace(/,/g, "")) || 0;
+                const accA = toHalf(rowA[COL_A.ACC] || "").replace(/-/g, "");
+
+                // 搜尋 B 區匹配項 (優先找備註，找不到再找金額)
+                let bIdx = dataB.findIndex((rowB, idx) => 
+                    idx > 0 && rowB[0] !== "" && rowB[0].includes(noteA) && noteA !== ""
+                );
+                let matchMethod = "備註匹配成功";
+
+                if (bIdx === -1) {
+                    bIdx = dataB.findIndex((rowB, idx) => 
+                        idx > 0 && parseFloat(String(rowB[1]).replace(/,/g, "")) === amtA
+                    );
+                    matchMethod = bIdx !== -1 ? "金額匹配建議" : "無匹配資訊";
+                }
+
+                const match = bIdx !== -1 ? dataB[bIdx] : null;
+                let isAmtMatch = false, isAccMatch = false;
+
+                if (match) {
+                    matchedBIndexes.add(bIdx);
+                    isAmtMatch = parseFloat(String(match[1]).replace(/,/g, "")) === amtA;
+                    isAccMatch = String(match[2]).replace(/-/g, "").includes(accA);
+                }
+
+                const isFullySuccess = isAmtMatch && isAccMatch;
+                const rowClass = isFullySuccess ? "bg-green-50" : (match ? "bg-yellow-50" : "bg-red-50");
+
+                htmlA += `
+                    <tr class="${rowClass} hover:bg-opacity-50">
+                        <td class="border p-2 text-center text-lg">${isFullySuccess ? '✅' : (match ? '⚠️' : '❌')}</td>
+                        <td class="border p-2">${noteA || '<span class="text-gray-300">無備註</span>'}</td>
+                        <td class="border p-2 font-mono ${isAmtMatch ? 'text-green-700' : 'text-red-600 font-bold'}">${amtA.toLocaleString()}</td>
+                        <td class="border p-2 text-xs">${isAccMatch ? '<span class="text-green-700">一致</span>' : '<span class="text-red-500">不符/缺漏</span>'}</td>
+                        <td class="border p-2 text-xs text-gray-500">${matchMethod}</td>
+                    </tr>`;
+            });
+
+            // --- 檢查 B 區多出的資料 (B 有 A 沒有) ---
+            const extraB = dataB.filter((_, idx) => idx > 0 && !matchedBIndexes.has(idx));
+            if (extraB.length > 0) {
+                htmlB = `<tr class="bg-gray-100"><td colspan="5" class="p-2 font-bold text-gray-600">以下為 B 區多出 (A 區找不到) 的資料：</td></tr>`;
+                extraB.forEach(rowB => {
+                    htmlB += `
+                        <tr class="bg-purple-50">
+                            <td class="border p-2 text-center">❓</td>
+                            <td class="border p-2">${rowB[0] || "無備註"}</td>
+                            <td class="border p-2 text-purple-600 font-mono font-bold">${parseFloat(rowB[1] || 0).toLocaleString()}</td>
+                            <td class="border p-2 text-xs">帳號: ${rowB[2]}</td>
+                            <td class="border p-2 text-xs text-gray-500">請確認是否漏匯</td>
+                        </tr>`;
+                });
+            }
+
+            // 渲染完整表格
+            resultArea.innerHTML = `
+                <div class="overflow-x-auto shadow-lg rounded-lg">
+                    <table class="w-full text-left text-sm border-collapse bg-white">
+                        <thead class="bg-gray-800 text-white">
+                            <tr>
+                                <th class="p-3 w-16 text-center">狀態</th>
+                                <th class="p-3">銀行備註 (A)</th>
+                                <th class="p-3">金額</th>
+                                <th class="p-3">帳號對應</th>
+                                <th class="p-3">核對結果</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${htmlA}
+                            ${htmlB}
+                        </tbody>
+                    </table>
+                </div>`;
+        }
+    </script>
+</body>
+</html>
